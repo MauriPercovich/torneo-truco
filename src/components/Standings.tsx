@@ -26,13 +26,13 @@ function useFitRows(deps: unknown) {
     if (!panel || !list || !container) return;
     const wide = window.matchMedia('(min-width: 1100px) and (min-height: 560px)');
     const measure = () => {
-      const rows = list.querySelectorAll('.st-row').length;
-      const gap = parseFloat(getComputedStyle(list).rowGap) || 0;
-      const others = [...list.children].filter((c) => !c.classList.contains('st-row'));
-      const othersH = others.reduce((h, c) => h + (c as HTMLElement).offsetHeight, 0);
+      const rows = [...list.querySelectorAll<HTMLElement>('.st-row')];
+      if (!rows.length) return 0;
+      const rowsH = rows.reduce((h, r) => h + r.offsetHeight, 0);
+      // Todo lo que no es fila (encabezados de grupo, separadores, espacios) queda fijo.
+      const fixed = list.scrollHeight - rowsH;
       const chrome = panel.offsetHeight - list.offsetHeight;
-      const avail = container.clientHeight - chrome - othersH - gap * (list.children.length - 1);
-      return rows ? Math.floor(avail / rows) : 0;
+      return Math.floor((container.clientHeight - chrome - fixed - 2) / rows.length);
     };
     const fit = () => {
       panel.style.removeProperty('--row-h');
@@ -84,23 +84,33 @@ export function Standings({ tables, format, total }: Props) {
       </div>
 
       <div className="st-rows" ref={rowsRef}>
-        {tables.map((t) => (
-          <Fragment key={t.id ?? 'liga'}>
-            {t.label && <div className="group-label kicker">{t.label}</div>}
-            {t.rows.map((r, i) => (
-              <Fragment key={r.id}>
-                <StandingRow row={r} pos={i + 1} qualified={i < t.qual} />
-                {i === t.qual - 1 && t.rows.length > t.qual && (
-                  <div className="cut">
-                    <span className="line" />
-                    <span className="kicker">{cutLabel}</span>
-                    <span className="line" />
-                  </div>
-                )}
-              </Fragment>
-            ))}
-          </Fragment>
-        ))}
+        {tables.map((t) => {
+          const body = t.rows.map((r, i) => (
+            <Fragment key={r.id}>
+              <StandingRow row={r} pos={i + 1} qualified={i < t.qual} />
+              {i === t.qual - 1 && t.rows.length > t.qual && (
+                <div className="cut">
+                  <span className="line" />
+                  <span className="kicker">{cutLabel}</span>
+                  <span className="line" />
+                </div>
+              )}
+            </Fragment>
+          ));
+          if (!t.label) return <Fragment key="liga">{body}</Fragment>;
+          return (
+            <div key={t.id} className="group-block">
+              <div className="group-head">
+                <span className="group-badge">{t.letter}</span>
+                <span className="group-title">{t.label}</span>
+                <span className="group-meta">
+                  {t.qual === 1 ? 'Clasifica 1' : `Clasifican ${t.qual}`}
+                </span>
+              </div>
+              <div className="group-rows">{body}</div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="legend">
