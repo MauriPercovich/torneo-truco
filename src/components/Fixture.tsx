@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { Match, Team } from '../lib/tournament';
 import { isPlayed } from '../lib/tournament';
 
@@ -11,6 +12,14 @@ type Props = {
 export function Fixture({ teams, matches, target, onPick }: Props) {
   const name = (id: string) => teams.find((t) => t.id === id)?.name ?? '—';
   const roundNums = [...new Set(matches.map((m) => m.round))].sort((a, b) => a - b);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Al abrir, el fixture arranca en la primera fecha con partidos pendientes.
+  useEffect(() => {
+    const list = listRef.current;
+    const current = list?.querySelector<HTMLElement>('[data-pending="true"]');
+    if (list && current) list.scrollTo({ top: current.offsetTop - list.offsetTop, behavior: 'instant' });
+  }, []);
 
   return (
     <section className="fixture">
@@ -18,12 +27,12 @@ export function Fixture({ teams, matches, target, onPick }: Props) {
         <h2>Fixture</h2>
         <span className="aside">A {target} puntos · tocá un partido</span>
       </div>
-      <div className="fixture-list">
+      <div className="fixture-list" ref={listRef}>
         {roundNums.map((r) => {
           const ms = matches.filter((m) => m.round === r);
           const done = ms.filter(isPlayed).length;
           return (
-            <div key={r} className="round">
+            <div key={r} className="round" data-pending={done < ms.length}>
               <div className="round-head">
                 <span className="kicker">Fecha {r}</span>
                 <span className="round-status">
