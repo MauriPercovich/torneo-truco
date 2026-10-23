@@ -6,13 +6,14 @@ import { Modal } from './Modal';
 
 type Props = {
   teams: Team[];
+  isGroups: boolean;
   onSave: (teams: Team[]) => void;
   onResetResults: () => void;
   onClose: () => void;
 };
 
 /** Edita un borrador; solo se aplica al Guardar. */
-export function TeamsModal({ teams, onSave, onResetResults, onClose }: Props) {
+export function TeamsModal({ teams, isGroups, onSave, onResetResults, onClose }: Props) {
   const [draft, setDraft] = useState<Team[]>(() => teams.map((t) => ({ ...t })));
 
   const save = () => {
@@ -27,7 +28,7 @@ export function TeamsModal({ teams, onSave, onResetResults, onClose }: Props) {
         <span className="modal-title">Equipos</span>
         <p>
           Cambiar nombres conserva los resultados. Agregar o quitar equipos rearma el fixture
-          desde cero.
+          desde cero{isGroups ? ' y después te deja ubicar a los nuevos en su grupo' : ''}.
         </p>
       </div>
 

@@ -6,28 +6,34 @@ import { Playoffs } from './components/Playoffs';
 import { ResultModal } from './components/ResultModal';
 import { SettingsModal } from './components/SettingsModal';
 import { TeamsModal } from './components/TeamsModal';
-import type { Saved, Team } from './lib/tournament';
+import { GroupsModal } from './components/GroupsModal';
+import type { Format, Group, Saved, Team } from './lib/tournament';
 import {
-  PO_LABELS,
-  computeBracket,
-  computeStandings,
+  autoGroups,
+  buildMatches,
+  computeTables,
   isPlayed,
-  isPoKey,
   loadSaved,
   persistSaved,
-  roundRobin,
+  playoffSize,
+  playoffTitle,
+  reconcileGroups,
 } from './lib/tournament';
+import { buildBracket, dropDownstream } from './lib/bracket';
 
 type View = 'regular' | 'playoffs';
+type Editing = { kind: 'match' | 'po'; id: string } | null;
 
 export default function App() {
   const [data, setData] = useState<Saved>(loadSaved);
   const [view, setView] = useState<View>('regular');
-  const [editId, setEditId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Editing>(null);
   const [teamsOpen, setTeamsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
 
-  const { teams, matches, playoffs, targetReg, targetPo } = data;
+  const { format, teams, groups, matches, playoffs, targetReg, targetPo } = data;
+  const isGroups = format === 'grupos';
 
   const update = (patch: Partial<Saved>) => setData((d) => ({ ...d, ...patch }));
 
@@ -37,40 +43,46 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setEditId(null);
+        setEditing(null);
         setTeamsOpen(false);
         setSettingsOpen(false);
+        setGroupsOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const rows = useMemo(() => computeStandings(teams, matches), [teams, matches]);
+  const tables = useMemo(() => computeTables(data), [data]);
+  const played = matches.filter(isPlayed).length;
   const bracket = useMemo(
-    () => computeBracket(rows, matches, playoffs),
-    [rows, matches, playoffs],
+    () => buildBracket(tables, playoffs, { played, total: matches.length }),
+    [tables, playoffs, played, matches.length],
   );
+  const hasResults = played > 0 || Object.keys(playoffs).length > 0;
+  const nRounds = bracket.rounds.length;
 
   // ── Modal de resultado ──
-  const editing = (() => {
-    if (!editId) return null;
-    if (isPoKey(editId)) {
-      const r = bracket.result(editId);
+  const modal = (() => {
+    if (!editing) return null;
+    if (editing.kind === 'po') {
+      const m = bracket.rounds.flat().find((x) => x.id === editing.id);
+      if (!m || !m.a || !m.b) return null;
       return {
-        label: PO_LABELS[editId],
-        aName: bracket.sideA[editId]?.name ?? '—',
-        bName: bracket.sideB[editId]?.name ?? '—',
-        initial: r ? { sa: r.sa, sb: r.sb } : { sa: 0, sb: 0 },
+        label: m.label,
+        aName: m.a.row.name,
+        bName: m.b.row.name,
+        initial: m.result ? { sa: m.result.sa, sb: m.result.sb } : { sa: 0, sb: 0 },
         target: targetPo,
-        hasResult: !!r,
+        hasResult: !!m.result,
       };
     }
-    const m = matches.find((x) => x.id === editId);
+    const m = matches.find((x) => x.id === editing.id);
     if (!m) return null;
     const name = (id: string) => teams.find((t) => t.id === id)?.name ?? '—';
+    const gi = groups.findIndex((g) => g.id === m.group);
     return {
-      label: `Fecha ${m.round}`,
+      label: isGroups && gi >= 0 ? `Grupo ${String.fromCharCode(65 + gi)} · Fecha ${m.round}` : `Fecha ${m.round}`,
       aName: name(m.a),
       bName: name(m.b),
       initial: { sa: m.sa ?? 0, sb: m.sb ?? 0 },
@@ -80,45 +92,85 @@ export default function App() {
   })();
 
   const saveResult = (sa: number, sb: number) => {
-    if (!editId || sa === sb) return;
-    if (isPoKey(editId)) {
-      const next = { ...playoffs, [editId]: { sa, sb } };
-      const prev = playoffs[editId];
-      // Si cambia el ganador de una semi, la final queda sin efecto.
-      if (editId !== 'f' && prev && prev.sa > prev.sb !== sa > sb) delete next.f;
+    if (!editing || sa === sb) return;
+    if (editing.kind === 'po') {
+      const id = editing.id;
+      let next = { ...playoffs, [id]: { sa, sb } };
+      const prev = playoffs[id];
+      // Si cambia el ganador, los cruces siguientes quedan sin efecto.
+      if (prev && prev.sa > prev.sb !== sa > sb) next = dropDownstream(next, id, nRounds);
       update({ playoffs: next });
     } else {
-      update({ matches: matches.map((m) => (m.id === editId ? { ...m, sa, sb } : m)) });
+      update({ matches: matches.map((m) => (m.id === editing.id ? { ...m, sa, sb } : m)) });
     }
-    setEditId(null);
+    setEditing(null);
   };
 
   const clearResult = () => {
-    if (!editId) return;
-    if (isPoKey(editId)) {
-      const next = { ...playoffs };
-      delete next[editId];
-      if (editId !== 'f') delete next.f;
+    if (!editing) return;
+    if (editing.kind === 'po') {
+      const next = dropDownstream(playoffs, editing.id, nRounds);
+      delete next[editing.id];
       update({ playoffs: next });
     } else {
       update({
-        matches: matches.map((m) => (m.id === editId ? { ...m, sa: null, sb: null } : m)),
+        matches: matches.map((m) => (m.id === editing.id ? { ...m, sa: null, sb: null } : m)),
       });
     }
-    setEditId(null);
+    setEditing(null);
+  };
+
+  // ── Formato y clasificados ──
+  const setFormat = (f: Format) => {
+    if (f === format) return;
+    if (hasResults && !window.confirm('Cambiar el formato rearma el fixture y borra todos los resultados. ¿Seguir?'))
+      return;
+    if (f === 'grupos') {
+      const base = groups.length ? groups : autoGroups(teams.map((t) => t.id), teams.length >= 4 ? 2 : 1);
+      const g = reconcileGroups(base, teams);
+      update({ format: f, groups: g, matches: buildMatches(f, teams, g), playoffs: {} });
+      setSettingsOpen(false);
+      setGroupsOpen(true);
+    } else {
+      update({ format: f, matches: buildMatches(f, teams, groups), playoffs: {} });
+    }
+    setView('regular');
+  };
+
+  const setQual = (k: 'qualLiga' | 'qualPerGroup', n: number) => {
+    if (data[k] === n) return;
+    if (
+      Object.keys(playoffs).length > 0 &&
+      !window.confirm('Cambiar los clasificados rearma el playoff y borra sus resultados. ¿Seguir?')
+    )
+      return;
+    update({ [k]: n, playoffs: {} });
+  };
+
+  const saveGroups = (g: Group[]) => {
+    update({ groups: g, matches: buildMatches('grupos', teams, g), playoffs: {} });
+    setGroupsOpen(false);
+    setView('regular');
   };
 
   // ── Equipos ──
   const saveTeams = (clean: Team[]) => {
     const sameSet =
       clean.length === teams.length && clean.every((t) => teams.some((o) => o.id === t.id));
+    setTeamsOpen(false);
     if (sameSet) {
       update({ teams: clean });
-    } else {
-      update({ teams: clean, matches: roundRobin(clean.map((t) => t.id)), playoffs: {} });
-      setView('regular');
+      return;
     }
-    setTeamsOpen(false);
+    if (isGroups) {
+      const g = reconcileGroups(groups, clean);
+      update({ teams: clean, groups: g, matches: buildMatches('grupos', clean, g), playoffs: {} });
+      // Con equipos nuevos conviene revisar en qué grupo quedaron.
+      setGroupsOpen(true);
+    } else {
+      update({ teams: clean, matches: buildMatches('liga', clean, groups), playoffs: {} });
+    }
+    setView('regular');
   };
 
   const resetResults = () => {
@@ -129,6 +181,7 @@ export default function App() {
   };
 
   const isPo = view === 'playoffs';
+  const phaseName = isGroups ? 'fase de grupos' : 'fase regular';
 
   return (
     <div className="app">
@@ -146,7 +199,7 @@ export default function App() {
               className={`tab${!isPo ? ' active' : ''}`}
               onClick={() => setView('regular')}
             >
-              Fase regular
+              {isGroups ? 'Fase de grupos' : 'Fase regular'}
             </button>
             <button
               type="button"
@@ -155,7 +208,7 @@ export default function App() {
               className={`tab${isPo ? ' active' : ''}`}
               onClick={() => setView('playoffs')}
             >
-              Semis y final
+              {playoffTitle(data)}
             </button>
           </div>
           <button
@@ -176,47 +229,71 @@ export default function App() {
       <div className="views">
         <div className={`view${isPo ? ' active' : ''}`} aria-hidden={!isPo}>
           <Playoffs
-            rows={rows}
             bracket={bracket}
             target={targetPo}
-            onPick={(k) => setEditId(k)}
+            phaseName={phaseName}
+            onPick={(m) => setEditing({ kind: 'po', id: m.id })}
           />
         </div>
         <div className={`view${!isPo ? ' active' : ''}`} aria-hidden={isPo}>
           <main className="regular">
-            <Standings rows={rows} />
+            <Standings tables={tables} format={format} total={playoffSize(data)} />
             <Fixture
+              key={`${format}-${matches.length}-${groups.map((g) => g.id).join()}`}
               teams={teams}
               matches={matches}
+              groups={isGroups ? groups : null}
               target={targetReg}
-              onPick={(m) => setEditId(m.id)}
+              onPick={(m) => setEditing({ kind: 'match', id: m.id })}
             />
           </main>
         </div>
       </div>
 
-      {editing && (
+      {modal && editing && (
         <ResultModal
-          key={editId}
-          {...editing}
+          key={editing.id}
+          {...modal}
           onSave={saveResult}
           onClear={clearResult}
-          onClose={() => setEditId(null)}
+          onClose={() => setEditing(null)}
         />
       )}
 
       {settingsOpen && (
         <SettingsModal
+          format={format}
+          groups={groups}
+          teamCount={teams.length}
           targetReg={targetReg}
           targetPo={targetPo}
-          onChange={(k, v) => update({ [k]: v })}
+          qualLiga={data.qualLiga}
+          qualPerGroup={data.qualPerGroup}
+          onTarget={(k, v) => update({ [k]: v })}
+          onQual={setQual}
+          onFormat={setFormat}
+          onOpenGroups={() => {
+            setSettingsOpen(false);
+            setGroupsOpen(true);
+          }}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {groupsOpen && (
+        <GroupsModal
+          teams={teams}
+          groups={groups}
+          hasResults={hasResults}
+          onSave={saveGroups}
+          onClose={() => setGroupsOpen(false)}
         />
       )}
 
       {teamsOpen && (
         <TeamsModal
           teams={teams}
+          isGroups={isGroups}
           onSave={saveTeams}
           onResetResults={resetResults}
           onClose={() => setTeamsOpen(false)}

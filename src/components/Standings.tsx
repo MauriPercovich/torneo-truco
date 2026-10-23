@@ -1,14 +1,74 @@
-import { Fragment } from 'react';
-import type { Row } from '../lib/tournament';
+import { Fragment, useLayoutEffect, useRef } from 'react';
+import type { Format, Row, Table } from '../lib/tournament';
 
-export function Standings({ rows }: { rows: Row[] }) {
+type Props = { tables: Table[]; format: Format; total: number };
+
+function qualifyNote(format: Format, tables: Table[], total: number) {
+  if (format === 'grupos') {
+    const per = Math.max(0, ...tables.map((t) => t.qual));
+    return per === 1
+      ? 'El primero de cada grupo va a playoff'
+      : `Los ${per} primeros de cada grupo van a playoff`;
+  }
+  if (total === 2) return 'Los 2 primeros van a la final';
+  if (total === 4) return 'Los 4 primeros van a semis';
+  return `Los ${total} primeros van a playoff`;
+}
+
+/** En pantalla ancha (TV/PC) achica las filas lo justo para que la tabla entre entera. */
+function useFitRows(deps: unknown) {
+  const panelRef = useRef<HTMLElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const list = rowsRef.current;
+    const container = panel?.parentElement;
+    if (!panel || !list || !container) return;
+    const wide = window.matchMedia('(min-width: 1100px) and (min-height: 560px)');
+    const measure = () => {
+      const rows = list.querySelectorAll('.st-row').length;
+      const gap = parseFloat(getComputedStyle(list).rowGap) || 0;
+      const others = [...list.children].filter((c) => !c.classList.contains('st-row'));
+      const othersH = others.reduce((h, c) => h + (c as HTMLElement).offsetHeight, 0);
+      const chrome = panel.offsetHeight - list.offsetHeight;
+      const avail = container.clientHeight - chrome - othersH - gap * (list.children.length - 1);
+      return rows ? Math.floor(avail / rows) : 0;
+    };
+    const fit = () => {
+      panel.style.removeProperty('--row-h');
+      delete panel.dataset.tight;
+      if (!wide.matches) return;
+      let h = measure();
+      if (!h) return;
+      // Si no entra ni con filas mínimas, se esconde la leyenda y se afinan los separadores.
+      if (h < 30) {
+        panel.dataset.tight = 'true';
+        h = measure();
+      }
+      panel.style.setProperty('--row-h', `${Math.max(28, Math.min(64, h))}px`);
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(container);
+    wide.addEventListener('change', fit);
+    return () => {
+      ro.disconnect();
+      wide.removeEventListener('change', fit);
+    };
+  }, [deps]);
+  return { panelRef, rowsRef };
+}
+
+export function Standings({ tables, format, total }: Props) {
+  const { panelRef, rowsRef } = useFitRows(tables);
+  const cutLabel = format === 'liga' && total === 4 ? 'Zona de semis' : 'Zona de playoff';
   return (
-    <section className="standings">
+    <section className="standings" ref={panelRef}>
       <div className="section-head">
-        <h2>Tabla de posiciones</h2>
+        <h2>{format === 'grupos' ? 'Posiciones por grupo' : 'Tabla de posiciones'}</h2>
         <span className="qualify-note">
           <span className="dot lg gold" />
-          Los 4 primeros van a semis
+          {qualifyNote(format, tables, total)}
         </span>
       </div>
 
@@ -23,42 +83,24 @@ export function Standings({ rows }: { rows: Row[] }) {
         <span className="c">Dif</span>
       </div>
 
-      <div className="st-rows">
-        {rows.map((r, i) => {
-          const q = i < 4;
-          const difColor =
-            r.d > 0 ? 'var(--win)' : r.d < 0 ? 'var(--dif-neg)' : 'var(--num-dim)';
-          return (
-            <Fragment key={r.id}>
-              <div className={`st-grid st-row${q ? ' q' : ''}`}>
-                <div className="pos">{i + 1}</div>
-                <div className="st-team">
-                  <span className="st-name">{r.name}</span>
-                  <div className="form">
-                    {r.form.slice(-5).map((w, j) => (
-                      <span key={j} className={`dot ${w ? 'win' : 'loss'}`} />
-                    ))}
+      <div className="st-rows" ref={rowsRef}>
+        {tables.map((t) => (
+          <Fragment key={t.id ?? 'liga'}>
+            {t.label && <div className="group-label kicker">{t.label}</div>}
+            {t.rows.map((r, i) => (
+              <Fragment key={r.id}>
+                <StandingRow row={r} pos={i + 1} qualified={i < t.qual} />
+                {i === t.qual - 1 && t.rows.length > t.qual && (
+                  <div className="cut">
+                    <span className="line" />
+                    <span className="kicker">{cutLabel}</span>
+                    <span className="line" />
                   </div>
-                </div>
-                <span className="c n">{r.pj}</span>
-                <span className="c pg">{r.pg}</span>
-                <span className="c n">{r.pp}</span>
-                <span className="c n dim hide-sm">{r.pf}</span>
-                <span className="c n dim hide-sm">{r.pc}</span>
-                <span className="c dif" style={{ color: difColor }}>
-                  {r.d > 0 ? `+${r.d}` : r.d}
-                </span>
-              </div>
-              {i === 3 && rows.length > 4 && (
-                <div className="cut">
-                  <span className="line" />
-                  <span className="kicker">Zona de semis</span>
-                  <span className="line" />
-                </div>
-              )}
-            </Fragment>
-          );
-        })}
+                )}
+              </Fragment>
+            ))}
+          </Fragment>
+        ))}
       </div>
 
       <div className="legend">
@@ -74,5 +116,30 @@ export function Standings({ rows }: { rows: Row[] }) {
         </span>
       </div>
     </section>
+  );
+}
+
+function StandingRow({ row: r, pos, qualified }: { row: Row; pos: number; qualified: boolean }) {
+  const difColor = r.d > 0 ? 'var(--win)' : r.d < 0 ? 'var(--dif-neg)' : 'var(--num-dim)';
+  return (
+    <div className={`st-grid st-row${qualified ? ' q' : ''}`}>
+      <div className="pos">{pos}</div>
+      <div className="st-team">
+        <span className="st-name">{r.name}</span>
+        <div className="form">
+          {r.form.slice(-5).map((w, j) => (
+            <span key={j} className={`dot ${w ? 'win' : 'loss'}`} />
+          ))}
+        </div>
+      </div>
+      <span className="c n">{r.pj}</span>
+      <span className="c pg">{r.pg}</span>
+      <span className="c n">{r.pp}</span>
+      <span className="c n dim hide-sm">{r.pf}</span>
+      <span className="c n dim hide-sm">{r.pc}</span>
+      <span className="c dif" style={{ color: difColor }}>
+        {r.d > 0 ? `+${r.d}` : r.d}
+      </span>
+    </div>
   );
 }
