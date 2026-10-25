@@ -22,25 +22,28 @@ export type Saved = {
   playoffs: Playoffs;
   targetReg: number;
   targetPo: number;
-  /** Clasificados a playoff en todos contra todos (total). */
+  /** Clasificados a playoff en todos contra todos. */
   qualLiga: number;
-  /** Clasificados a playoff por grupo. */
-  qualPerGroup: number;
+  /** Clasificados a playoff en formato grupos (total; se reparte solo). */
+  qualTotal: number;
 };
 
 export const STORAGE_KEY = 'truco-torneo-v1';
-export const MAX_PLAYOFF = 16;
-export const DEFAULT_TEAMS = [
-  'Los Anchos',
-  'Falta Envido',
-  'Siete de Oro',
-  'Retruco',
-  'Las Flores',
-  'Vale Cuatro',
+export const MAX_PLAYOFF = 64;
+
+/** Nombres de ejemplo para el torneo de muestra (32 parejas). */
+export const SAMPLE_TEAMS = [
+  'Los Anchos', 'Falta Envido', 'Siete de Oro', 'Retruco', 'Las Flores', 'Vale Cuatro',
+  'Mano Brava', 'Ancho de Espada', 'La Muestra', 'Contraflor', 'Real Envido', 'Quiero Retruco',
+  'Los Mazos', 'Cuatro de Copas', 'Siete Bravo', 'Las Pardas', 'Mano a Mano', 'Los Bastos',
+  'La Viuda', 'El Pie', 'Truco Seco', 'Los Tanteros', 'Envido Va', 'Flor de Oro',
+  'Siete de Espada', 'Ancho Falso', 'Las Copas', 'Los Oros', 'Mazo y Mano', 'La Primera',
+  'El Tercero', 'Quiero Vale',
 ];
 
 export const uid = () => Math.random().toString(36).slice(2, 9);
-export const groupLetter = (i: number) => String.fromCharCode(65 + i);
+export const groupLetter = (i: number) =>
+  i < 26 ? String.fromCharCode(65 + i) : String.fromCharCode(65 + Math.floor(i / 26) - 1) + String.fromCharCode(65 + (i % 26));
 
 export const clampScore = (v: unknown) => {
   const n = parseInt(String(v), 10);
@@ -76,10 +79,14 @@ export function roundRobin(ids: string[], group?: string): Match[] {
 
 /** Reparte equipos en n grupos de forma pareja (1→A, 2→B, …). */
 export function autoGroups(teamIds: string[], n: number): Group[] {
-  const groups: Group[] = Array.from({ length: n }, () => ({ id: uid(), teamIds: [] }));
-  teamIds.forEach((id, i) => groups[i % n].teamIds.push(id));
+  const count = Math.max(1, Math.min(n, Math.floor(teamIds.length / 2) || 1));
+  const groups: Group[] = Array.from({ length: count }, () => ({ id: uid(), teamIds: [] }));
+  teamIds.forEach((id, i) => groups[i % count].teamIds.push(id));
   return groups;
 }
+
+/** Cantidad de grupos sugerida para que queden de a 4. */
+export const suggestedGroups = (teams: number) => Math.max(1, Math.round(teams / 4));
 
 export function buildMatches(format: Format, teams: Team[], groups: Group[]): Match[] {
   if (format === 'grupos') return groups.flatMap((g) => roundRobin(g.teamIds, g.id));
@@ -91,8 +98,8 @@ export function buildMatches(format: Format, teams: Team[], groups: Group[]): Ma
 export function reconcileGroups(groups: Group[], teams: Team[]): Group[] {
   const ids = new Set(teams.map((t) => t.id));
   let next = groups.map((g) => ({ ...g, teamIds: g.teamIds.filter((id) => ids.has(id)) }));
+  if (next.length === 0) return autoGroups(teams.map((t) => t.id), suggestedGroups(teams.length));
   const placed = new Set(next.flatMap((g) => g.teamIds));
-  if (next.length === 0) next = autoGroups([], Math.min(2, Math.max(1, Math.floor(teams.length / 2))));
   for (const t of teams) {
     if (placed.has(t.id)) continue;
     const smallest = next.reduce((a, b) => (b.teamIds.length < a.teamIds.length ? b : a));
@@ -102,18 +109,20 @@ export function reconcileGroups(groups: Group[], teams: Team[]): Group[] {
   return next;
 }
 
-export function freshTournament(names = DEFAULT_TEAMS): Saved {
+/** Torneo de muestra: 32 parejas en 8 grupos de 4, clasifican 16. */
+export function freshTournament(names = SAMPLE_TEAMS): Saved {
   const teams = names.map((name) => ({ id: uid(), name }));
+  const groups = autoGroups(teams.map((t) => t.id), suggestedGroups(teams.length));
   return {
-    format: 'liga',
+    format: 'grupos',
     teams,
-    groups: [],
-    matches: roundRobin(teams.map((t) => t.id)),
+    groups,
+    matches: buildMatches('grupos', teams, groups),
     playoffs: {},
     targetReg: 30,
-    targetPo: 40,
+    targetPo: 30,
     qualLiga: 4,
-    qualPerGroup: 2,
+    qualTotal: 16,
   };
 }
 
@@ -122,7 +131,7 @@ const LEGACY_PO: Record<string, string> = { s1: 'r0m0', s2: 'r0m1', f: 'r1m0' };
 export function loadSaved(): Saved {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const saved = raw ? (JSON.parse(raw) as Partial<Saved>) : null;
+    const saved = raw ? (JSON.parse(raw) as Partial<Saved> & { qualPerGroup?: number }) : null;
     if (saved && Array.isArray(saved.teams) && Array.isArray(saved.matches)) {
       // Versiones anteriores guardaban los playoffs como s1 / s2 / f.
       const playoffs: Playoffs = {};
@@ -131,16 +140,21 @@ export function loadSaved(): Saved {
       }
       const format: Format = saved.format === 'grupos' ? 'grupos' : 'liga';
       const groups = Array.isArray(saved.groups) ? saved.groups : [];
+      const fixedGroups = format === 'grupos' ? reconcileGroups(groups, saved.teams) : groups;
+      // Antes se elegía "clasifican por grupo"; ahora se guarda el total.
+      const qualTotal =
+        saved.qualTotal ??
+        fixedGroups.reduce((n, g) => n + Math.min(saved.qualPerGroup ?? 2, g.teamIds.length), 0);
       return {
         format,
         teams: saved.teams,
-        groups: format === 'grupos' ? reconcileGroups(groups, saved.teams) : groups,
+        groups: fixedGroups,
         matches: saved.matches,
         playoffs,
         targetReg: saved.targetReg ?? 30,
         targetPo: saved.targetPo ?? 40,
         qualLiga: saved.qualLiga ?? 4,
-        qualPerGroup: saved.qualPerGroup ?? 2,
+        qualTotal: qualTotal || 4,
       };
     }
   } catch {
@@ -208,19 +222,79 @@ export function computeStandings(teams: Team[], matches: Match[]): Row[] {
 export const compareRows = (x: Row, y: Row) =>
   y.pg - x.pg || y.d - x.d || y.pf - x.pf || x.name.localeCompare(y.name);
 
+/** Cómo se reparten los clasificados en formato grupos. */
+export type QualPlan = {
+  /** Clasifican directo los `per` primeros de cada grupo. */
+  per: number;
+  /** Posición (1-based) de la que se toman los "mejores": 3 = mejores terceros. 0 si no hay. */
+  extraPos: number;
+  /** Cuántos "mejores" de esa posición pasan. */
+  extraCount: number;
+  /** Total real de clasificados. */
+  total: number;
+  /** Total pedido (puede no alcanzarse si los grupos son chicos). */
+  requested: number;
+};
+
+export function qualPlan(groups: Group[], requested: number): QualPlan {
+  const teams = groups.reduce((n, g) => n + g.teamIds.length, 0);
+  const G = groups.length;
+  if (!G) return { per: 0, extraPos: 0, extraCount: 0, total: 0, requested };
+  const want = Math.max(2, Math.min(requested, teams, MAX_PLAYOFF));
+  const minSize = Math.min(...groups.map((g) => g.teamIds.length));
+  const per = Math.min(Math.floor(want / G), minSize);
+  const extra = want - per * G;
+  // Los que faltan salen de los mejores de la posición siguiente (ej. mejores terceros).
+  let extraPos = 0;
+  let extraCount = 0;
+  if (extra > 0) {
+    extraPos = per + 1;
+    const candidates = groups.filter((g) => g.teamIds.length >= extraPos).length;
+    extraCount = Math.min(extra, candidates);
+    if (!extraCount) extraPos = 0;
+  }
+  return { per, extraPos, extraCount, total: per * G + extraCount, requested };
+}
+
+export const ordinal = (n: number) => `${n}°`;
+const ORD_WORDS = ['', 'primeros', 'segundos', 'terceros', 'cuartos', 'quintos', 'sextos', 'séptimos', 'octavos'];
+export const ordWord = (n: number) => ORD_WORDS[n] ?? `${n}°`;
+
+export function describePlan(p: QualPlan): string {
+  if (p.total < 2) return 'Hacen falta al menos 2 clasificados.';
+  const parts: string[] = [];
+  if (p.per === 1) parts.push('el 1° de cada grupo');
+  else if (p.per > 1) parts.push(`los ${p.per} primeros de cada grupo`);
+  if (p.extraCount) {
+    parts.push(
+      p.extraCount === 1 ? `el mejor ${ordinal(p.extraPos)}` : `los ${p.extraCount} mejores ${ordWord(p.extraPos)}`,
+    );
+  }
+  const txt = parts.join(' + ');
+  return txt.charAt(0).toUpperCase() + txt.slice(1);
+}
+
 export type Table = {
   /** id del grupo (null en todos contra todos). */
   id: string | null;
   label: string | null;
   letter: string;
   rows: Row[];
-  /** Cuántos de esta tabla clasifican. */
+  /** Cuántos de esta tabla clasifican directo. */
   qual: number;
 };
 
-export function computeTables(s: Saved): Table[] {
+export type Tables = {
+  tables: Table[];
+  plan: QualPlan | null;
+  /** Ranking de la posición `extraPos` entre grupos (los "mejores terceros"). */
+  best: { row: Row; letter: string; group: string; qualified: boolean }[];
+};
+
+export function computeTables(s: Saved): Tables {
   if (s.format === 'grupos') {
-    return s.groups.map((g, i) => {
+    const plan = qualPlan(s.groups, s.qualTotal);
+    const tables = s.groups.map((g, i) => {
       const inGroup = new Set(g.teamIds);
       return {
         id: g.id,
@@ -230,26 +304,36 @@ export function computeTables(s: Saved): Table[] {
           s.teams.filter((t) => inGroup.has(t.id)),
           s.matches.filter((m) => m.group === g.id),
         ),
-        qual: Math.min(s.qualPerGroup, g.teamIds.length),
+        qual: Math.min(plan.per, g.teamIds.length),
       };
     });
+    const best = plan.extraCount
+      ? tables
+          .filter((t) => t.rows[plan.extraPos - 1])
+          .map((t) => ({ row: t.rows[plan.extraPos - 1], letter: t.letter, group: t.id! }))
+          .sort((x, y) => compareRows(x.row, y.row))
+          .map((b, i) => ({ ...b, qualified: i < plan.extraCount }))
+      : [];
+    return { tables, plan, best };
   }
-  return [
-    {
-      id: null,
-      label: null,
-      letter: '',
-      rows: computeStandings(s.teams, s.matches),
-      qual: Math.min(s.qualLiga, s.teams.length),
-    },
-  ];
+  return {
+    tables: [
+      {
+        id: null,
+        label: null,
+        letter: '',
+        rows: computeStandings(s.teams, s.matches),
+        qual: Math.min(s.qualLiga, s.teams.length),
+      },
+    ],
+    plan: null,
+    best: [],
+  };
 }
 
 /** Total de clasificados a playoff según el formato. */
 export function playoffSize(s: Saved): number {
-  if (s.format === 'grupos') {
-    return s.groups.reduce((n, g) => n + Math.min(s.qualPerGroup, g.teamIds.length), 0);
-  }
+  if (s.format === 'grupos') return qualPlan(s.groups, s.qualTotal).total;
   return Math.min(s.qualLiga, s.teams.length);
 }
 

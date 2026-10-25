@@ -1,4 +1,4 @@
-import type { Playoffs, PoResult, Row, Table } from './tournament';
+import type { Playoffs, PoResult, Row, Tables } from './tournament';
 import { compareRows } from './tournament';
 
 /** Un clasificado al playoff. */
@@ -39,8 +39,10 @@ export type Bracket = {
   total: number;
 };
 
-const ROUND_NAMES = ['Final', 'Semifinales', 'Cuartos de final', 'Octavos de final'];
-const ROUND_SHORT = ['Final', 'Semi', 'Cuartos', 'Octavos'];
+const ROUND_NAMES = ['Final', 'Semifinales', 'Cuartos de final', 'Octavos de final', '16avos de final', '32avos de final'];
+const ROUND_SHORT = ['Final', 'Semi', 'Cuartos', 'Octavos', '16avos', '32avos'];
+/** Nombre corto de cada ronda para encabezados de columna. */
+export const ROUND_COL = ['Final', 'Semis', 'Cuartos', 'Octavos', '16avos', '32avos'];
 
 export const matchId = (round: number, index: number) => `r${round}m${index}`;
 
@@ -54,9 +56,9 @@ function seedOrder(n: number): number[] {
   return order;
 }
 
-/** Ordena a los clasificados: primero todos los 1° de grupo, luego los 2°, etc.
- *  Dentro de cada escalón, por PG · Dif · PF. */
-export function rankQualified(tables: Table[]): Seed[] {
+/** Ordena a los clasificados: primero todos los 1° de grupo, luego los 2°, etc., y al final
+ *  los "mejores" de la posición siguiente. Dentro de cada escalón, por PG · Dif · PF. */
+export function rankQualified({ tables, best }: Tables): Seed[] {
   if (tables.length === 1 && tables[0].id === null) {
     const t = tables[0];
     return t.rows.slice(0, t.qual).map((row, i) => ({ row, tag: `${i + 1}°`, group: null, rank: i + 1 }));
@@ -70,11 +72,17 @@ export function rankQualified(tables: Table[]): Seed[] {
       .sort((x, y) => compareRows(x.row, y.row));
     tier.forEach((s) => out.push({ ...s, rank: out.length + 1 }));
   }
+  best
+    .filter((b) => b.qualified)
+    .forEach((b) => {
+      const pos = tables.find((t) => t.id === b.group)!.rows.indexOf(b.row) + 1;
+      out.push({ row: b.row, tag: `${b.letter}${pos}`, group: b.group, rank: out.length + 1 });
+    });
   return out;
 }
 
 export function buildBracket(
-  tables: Table[],
+  tables: Tables,
   playoffs: Playoffs,
   progress: { played: number; total: number },
 ): Bracket {
@@ -94,12 +102,14 @@ export function buildBracket(
   for (let m = 0; m < size / 2; m++) {
     pairs.push([seeds[order[2 * m] - 1] ?? null, seeds[order[2 * m + 1] - 1] ?? null]);
   }
-  // En grupos, evitar que dos del mismo grupo se crucen en la primera ronda.
+  // En grupos, evitar que dos del mismo grupo se crucen en la primera ronda
+  // (se intercambian rivales, primero con cruces cercanos para no desarmar la llave).
   const clash = (x: Seed | null, y: Seed | null) => !!x && !!y && x.group !== null && x.group === y.group;
   for (let m = 0; m < pairs.length; m++) {
     if (!clash(pairs[m][0], pairs[m][1])) continue;
-    for (let k = 0; k < pairs.length; k++) {
-      if (k === m || !pairs[k][1] || !pairs[m][1]) continue;
+    const others = pairs.map((_, k) => k).filter((k) => k !== m).sort((x, y) => Math.abs(x - m) - Math.abs(y - m));
+    for (const k of others) {
+      if (!pairs[k][1] || !pairs[m][1]) continue;
       if (!clash(pairs[m][0], pairs[k][1]) && !clash(pairs[k][0], pairs[m][1])) {
         [pairs[m][1], pairs[k][1]] = [pairs[k][1], pairs[m][1]];
         break;
